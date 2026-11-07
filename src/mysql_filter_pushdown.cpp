@@ -77,10 +77,6 @@ static Identifier GetCatalogName(const LogicalGet &get) {
 		auto &bdata = get.bind_data->Cast<MySQLBindData>();
 		return bdata.table_name.Catalog();
 	}
-	if (MySQLCatalog::IsMySQLQuery(table_scan.GetName().GetIdentifierName())) {
-		auto &bdata = get.bind_data->Cast<MySQLQueryBindData>();
-		return bdata.catalog_name;
-	}
 	throw InvalidInputException("Specified LogicalGet is not for MySQL");
 }
 

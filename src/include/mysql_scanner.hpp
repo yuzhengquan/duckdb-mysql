@@ -14,7 +14,6 @@
 #include "duckdb/main/client_context.hpp"
 
 #include "mysql_connection.hpp"
-#include "mysql_statement.hpp"
 #include "mysql_types.hpp"
 #include "mysql_utils.hpp"
 #include "storage/mysql_catalog.hpp"
@@ -47,61 +46,12 @@ public:
 	}
 };
 
-struct MySQLQueryBindData : public FunctionData {
-	MySQLQueryBindData(MySQLCatalog &catalog, vector<string> preliminary_queries_p, string query_p,
-	                   vector<Value> params_p, int64_t params_handle_p, vector<MySQLField> fields_p,
-	                   MySQLResultStreamingUser user_streaming_p, unique_ptr<MySQLStatement> prepared_stmt_p,
-	                   uint64_t prepare_connection_id_p, uint64_t pinned_connection_id_p, bool clear_catalog_cache_p)
-	    : catalog_name(catalog.GetName()), preliminary_queries(std::move(preliminary_queries_p)),
-	      query(std::move(query_p)), params(std::move(params_p)), params_handle(params_handle_p),
-	      fields(std::move(fields_p)), user_streaming(user_streaming_p), prepared_stmt(std::move(prepared_stmt_p)),
-	      prepare_connection_id(prepare_connection_id_p), pinned_connection_id(pinned_connection_id_p),
-	      clear_catalog_cache(clear_catalog_cache_p) {
-	}
-
-	MySQLQueryBindData(MySQLCatalog &catalog, vector<string> preliminary_queries_p, string query_p,
-	                   MySQLResultStreamingUser user_streaming_p, uint64_t pinned_connection_id_p,
-	                   bool clear_catalog_cache_p)
-	    : catalog_name(catalog.GetName()), preliminary_queries(std::move(preliminary_queries_p)),
-	      query(std::move(query_p)), user_streaming(user_streaming_p), pinned_connection_id(pinned_connection_id_p),
-	      clear_catalog_cache(clear_catalog_cache_p) {
-	}
-
-	~MySQLQueryBindData();
-
-	Identifier catalog_name;
-	vector<string> preliminary_queries;
-	string query;
-	vector<Value> params;
-	int64_t params_handle = 0;
-	vector<MySQLField> fields;
-	MySQLResultStreamingUser user_streaming = MySQLResultStreamingUser::UNINITIALIZED;
-	MySQLResultStreaming optimizer_streaming = MySQLResultStreaming::UNINITIALIZED;
-
-	unique_ptr<MySQLStatement> prepared_stmt;
-	uint64_t prepare_connection_id = 0;
-	uint64_t pinned_connection_id = 0;
-
-	bool clear_catalog_cache = false;
-
-public:
-	unique_ptr<FunctionData> Copy() const override {
-		throw NotImplementedException("MySQLBindData copy not supported");
-	}
-	bool Equals(const FunctionData &other_p) const override {
-		return false;
-	}
-};
 
 class MySQLScanFunction : public TableFunction {
 public:
 	MySQLScanFunction();
 };
 
-class MySQLQueryFunction : public TableFunction {
-public:
-	MySQLQueryFunction();
-};
 
 class MySQLClearCacheFunction : public TableFunction {
 public:
@@ -110,10 +60,6 @@ public:
 	static void ClearCacheOnSetting(ClientContext &context, SetScope scope, Value &parameter);
 };
 
-class MySQLExecuteFunction : public TableFunction {
-public:
-	MySQLExecuteFunction();
-};
 
 class MySQLPinConnectionFunction : public ScalarFunction {
 public:
@@ -125,14 +71,6 @@ public:
 	MySQLClosePinnedConnectionFunction();
 };
 
-class MySQLCreateParamsFunction : public ScalarFunction {
-public:
-	MySQLCreateParamsFunction();
-};
 
-class MySQLBindParamsFunction : public ScalarFunction {
-public:
-	MySQLBindParamsFunction();
-};
 
 } // namespace duckdb

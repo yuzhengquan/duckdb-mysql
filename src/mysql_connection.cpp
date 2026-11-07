@@ -4,7 +4,6 @@
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 
-#include "mysql_parameter.hpp"
 #include "mysql_types.hpp"
 
 namespace duckdb {
@@ -40,93 +39,7 @@ MySQLConnection MySQLConnection::Open(MySQLTypeConfig type_config, const string 
 	return MySQLConnection(std::move(connection), std::move(type_config), connection_string);
 }
 
-// Reads and discards the result of a query executed with the basic interface (if the query produced a result),
-// the result is fetched unbuffered, so the connection can be used for other queries.
-// must be called with the query_lock held
-void MySQLConnection::DrainBasicResult(optional_ptr<ClientContext> context, const string &query) {
-	auto con = GetConn();
-	auto result = MySQLResultPtr(mysql_use_result(con), MySQLResultDelete);
-	if (result) {
-		try {
-			// rows are not read into chunks here, interrupts are checked once per the chunk size of rows
-			idx_t row_count = 0;
-			while (mysql_fetch_row(result.get())) {
-				row_count++;
-				if (context && row_count % STANDARD_VECTOR_SIZE == 0) {
-					context->InterruptCheck();
-				}
-			}
-		} catch (...) {
-			// remaining rows are discarded when the result is freed, cancel the query to not read all of them
-			if (context) {
-				TryCancelQuery(*context, type_config, connection_string, connection->GetID());
-			}
-			throw;
-		}
-	}
-	if (mysql_errno(con) != 0) {
-		throw IOException("Failed to read result of query \"%s\": %s\n", query.c_str(), mysql_error(con));
-	}
-}
 
-// must be called with the query_lock held
-idx_t MySQLConnection::MySQLExecute(optional_ptr<ClientContext> context, MYSQL_STMT *stmt, const string &query,
-                                    const vector<Value> &params, bool streaming, bool prepared) {
-	if (MySQLConnection::DebugPrintQueries()) {
-		string msg = StringUtil::Format("%s /* streaming=%s */\n", query, streaming ? "TRUE" : "FALSE");
-		Printer::Print(msg);
-	}
-
-	if (!stmt) { // basic interface
-		auto con = GetConn();
-		int res_query = mysql_real_query(con, query.c_str(), query.size());
-		if (res_query != 0) {
-			throw IOException("Failed to run query \"%s\": %s\n", query.c_str(), mysql_error(con));
-		}
-		DrainBasicResult(context, query);
-		return 0;
-	}
-
-	// statement interface, may or may not be already prepared
-
-	if (!prepared) {
-		int res_prepare = mysql_stmt_prepare(stmt, query.c_str(), query.size());
-		if (res_prepare != 0) {
-			throw IOException("Failed to prepare MySQL query \"%s\": %s\n", query.c_str(), mysql_stmt_error(stmt));
-		}
-	}
-
-	vector<MySQLParameter> mysql_params;
-	vector<MYSQL_BIND> binds;
-	if (params.size() > 0) {
-		size_t expected_count = mysql_stmt_param_count(stmt);
-		if (expected_count != params.size()) {
-			throw IOException(
-			    "Incorrect query parameters count specified, expected: %zu, actual: %zu, MySQL query \"%s\": %s\n",
-			    expected_count, params.size(), query.c_str(), mysql_stmt_error(stmt));
-		}
-		mysql_params.reserve(params.size());
-		binds.reserve(params.size());
-		for (const Value &dp : params) {
-			mysql_params.emplace_back(query, dp);
-			binds.push_back(mysql_params.back().CreateBind());
-		}
-		auto res_bind = mysql_stmt_bind_param(stmt, binds.data());
-		if (res_bind != 0) {
-			throw IOException("Failed to bind parameters, count: %zu, MySQL query \"%s\": %s\n", binds.size(),
-			                  query.c_str(), mysql_stmt_error(stmt));
-		}
-	}
-
-	int res_exec = mysql_stmt_execute(stmt);
-	if (res_exec != 0) {
-		throw IOException("Failed to execute MySQL query \"%s\": %s\n", query.c_str(), mysql_stmt_error(stmt));
-	}
-
-	// the result is never stored by the client library, it is either streamed to the caller
-	// or read into a buffer-managed collection by MySQLResult::Materialize
-	return mysql_stmt_affected_rows(stmt);
-}
 
 // Reads and discards all remaining rows of a streamed result, so the connection can be used for other queries
 static void DrainResult(MySQLResult &result) {
@@ -135,115 +48,6 @@ static void DrainResult(MySQLResult &result) {
 	}
 }
 
-unique_ptr<MySQLResult> MySQLConnection::QueryInternal(optional_ptr<ClientContext> context, const string &query,
-                                                       const vector<Value> &params, MySQLResultStreaming streaming,
-                                                       MySQLConnectorInterface con_interface) {
-	auto con = GetConn();
-	bool result_streaming = streaming == MySQLResultStreaming::ALLOW_STREAMING;
-	bool basic_interface = con_interface == MySQLConnectorInterface::BASIC;
-
-	lock_guard<mutex> guard(query_lock);
-
-	if (basic_interface) {
-		MySQLExecute(context, nullptr, query, params, result_streaming);
-		return unique_ptr<MySQLResult>(nullptr);
-	}
-
-	// results that are not streamed are read eagerly into a buffer-managed ColumnDataCollection
-	// that is subject to the DuckDB memory limit and can be spilled to disk
-	if (!result_streaming && !context) {
-		throw InternalException("MySQL query result cannot be materialized without a client context, query \"%s\"",
-		                        query);
-	}
-
-	auto stmt = MySQLStatementPtr(mysql_stmt_init(con), MySQLStatementDelete);
-	if (!stmt) {
-		throw IOException("Failed to initialize MySQL query \"%s\": %s\n", query.c_str(), mysql_error(con));
-	}
-
-	idx_t affected_rows = MySQLExecute(context, stmt.get(), query, params, result_streaming);
-	unsigned long connection_id = connection->GetID();
-	auto result = make_uniq<MySQLResult>(context, query, std::move(stmt), type_config, connection_string, connection_id,
-	                                     streaming, affected_rows);
-	if (!result_streaming) {
-		result->Materialize();
-	}
-	return result;
-}
-
-unique_ptr<MySQLResult> MySQLConnection::Query(ClientContext &context, const string &query,
-                                               MySQLResultStreaming streaming) {
-	return QueryInternal(context, query, vector<Value>(), streaming, MySQLConnectorInterface::PREPARED_STATEMENT);
-}
-
-unique_ptr<MySQLResult> MySQLConnection::Query(ClientContext &context, const string &query, const vector<Value> &params,
-                                               MySQLResultStreaming streaming) {
-	return QueryInternal(context, query, params, streaming, MySQLConnectorInterface::PREPARED_STATEMENT);
-}
-
-unique_ptr<MySQLResult> MySQLConnection::QueryStmt(ClientContext &context, MySQLStatement &stmt,
-                                                   const vector<Value> &params, MySQLResultStreaming streaming) {
-	lock_guard<mutex> guard(query_lock);
-
-	bool result_streaming = streaming == MySQLResultStreaming::ALLOW_STREAMING;
-	bool prepared = true;
-	idx_t affected_rows = MySQLExecute(context, stmt.get(), stmt.Query(), params, result_streaming, prepared);
-	MYSQL_STMT *stmt_ptr_bare = stmt.get();
-	// owning pointer here only because it is required by result interface, stmt won't be destroyed
-	MySQLStatementPtr stmt_ptr(stmt_ptr_bare, MySQLStatementDelete);
-	unsigned long connection_id = connection->GetID();
-	auto result = make_uniq<MySQLResult>(context, stmt.Query(), std::move(stmt_ptr), type_config, connection_string,
-	                                     connection_id, streaming, affected_rows, stmt.FieldsCopy(),
-	                                     MySQLResultStatementLifetime::BORROWED);
-	if (!result_streaming) {
-		result->Materialize();
-	}
-	return result;
-}
-
-unique_ptr<MySQLStatement> MySQLConnection::Prepare(const string &query) {
-	lock_guard<mutex> guard(query_lock);
-	auto con = GetConn();
-
-	auto stmt = MySQLStatementPtr(mysql_stmt_init(con), MySQLStatementDelete);
-	if (!stmt) {
-		throw IOException("Failed to initialize MySQL query \"%s\": %s\n", query.c_str(), mysql_error(con));
-	}
-
-	int res_prepare = mysql_stmt_prepare(stmt.get(), query.c_str(), query.size());
-	if (res_prepare != 0) {
-		throw IOException("Failed to prepare MySQL query \"%s\": %s\n", query.c_str(), mysql_stmt_error(stmt.get()));
-	}
-
-	vector<MySQLField> fields = MySQLField::ReadFields(query, stmt.get(), type_config);
-
-	return make_uniq<MySQLStatement>(query, stmt.release(), std::move(fields));
-}
-
-void MySQLConnection::Initialize(ClientContext &context, const MySQLConnectionInitOptions &options) {
-	SetTypeConfig(options.type_config);
-
-	vector<Value> params;
-	params.emplace_back(Value(options.time_zone));
-	if (!options.time_zone.empty()) {
-		Execute(context, "SET TIME_ZONE = ?", params);
-	}
-}
-
-void MySQLConnection::Execute(ClientContext &context, const string &query) {
-	Execute(context, query, vector<Value>());
-}
-
-void MySQLConnection::Execute(ClientContext &context, const string &query, const vector<Value> &params) {
-	if (params.empty()) {
-		QueryInternal(context, query, params, MySQLResultStreaming::ALLOW_STREAMING, MySQLConnectorInterface::BASIC);
-		return;
-	}
-	// the result is fetched unbuffered and drained immediately
-	auto result = QueryInternal(context, query, params, MySQLResultStreaming::ALLOW_STREAMING,
-	                            MySQLConnectorInterface::PREPARED_STATEMENT);
-	DrainResult(*result);
-}
 
 bool MySQLConnection::IsOpen() {
 	return connection.get() != nullptr;
@@ -283,35 +87,6 @@ bool MySQLConnection::TryCancelQuery(ClientContext &context, const MySQLTypeConf
 	}
 }
 
-bool MySQLConnection::IsConnectionHealthy(const string &health_check_query) {
-	if (!IsOpen()) {
-		return false;
-	}
-
-	if (!health_check_query.empty()) {
-		try {
-			// called by the connection pool, no context is available, the result is fetched unbuffered and
-			// drained immediately, so the connection can be used for other queries
-			auto result =
-			    QueryInternal(nullptr, health_check_query, vector<Value>(), MySQLResultStreaming::ALLOW_STREAMING,
-			                  MySQLConnectorInterface::PREPARED_STATEMENT);
-			DrainResult(*result);
-			return true;
-		} catch (...) {
-			return false;
-		}
-	}
-
-	lock_guard<mutex> guard(query_lock);
-
-	MYSQL *mysql_conn = GetConn();
-	if (mysql_ping(mysql_conn) != 0) {
-		unsigned int err = mysql_errno(mysql_conn);
-		(void)err;
-		return false;
-	}
-	return true;
-}
 
 void MySQLConnection::Reset() {
 	lock_guard<mutex> guard(query_lock);
@@ -349,4 +124,144 @@ string MySQLConnection::GetServerInfo() {
 	return server_info != nullptr ? string(server_info) : string();
 }
 
+static string ValueToSQLLiteral(const Value &value) {
+	if (value.IsNull()) {
+		return "NULL";
+	}
+	switch (value.type().id()) {
+	case LogicalTypeId::BOOLEAN:
+		return value.GetValue<bool>() ? "1" : "0";
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+		return to_string(value.GetValue<int64_t>());
+	case LogicalTypeId::UTINYINT:
+	case LogicalTypeId::USMALLINT:
+	case LogicalTypeId::UINTEGER:
+	case LogicalTypeId::UBIGINT:
+		return to_string(value.GetValue<uint64_t>());
+	case LogicalTypeId::FLOAT:
+		return to_string(value.GetValue<float>());
+	case LogicalTypeId::DOUBLE:
+		return to_string(value.GetValue<double>());
+	case LogicalTypeId::VARCHAR:
+		return MySQLUtils::WriteLiteral(StringValue::Get(value));
+	case LogicalTypeId::DATE:
+	case LogicalTypeId::TIME:
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_TZ:
+		return MySQLUtils::WriteLiteral(value.ToString());
+	default:
+		throw IOException("Unsupported parameters type: \"%s\"", value.type());
+	}
+}
+
+static string InlineParams(const string &query, const vector<Value> &params) {
+	string result = query;
+	size_t pos = 0;
+	for (const Value &param : params) {
+		size_t found = result.find('?', pos);
+		if (found == string::npos) {
+			throw IOException("MySQL query has %zu parameters, but the query contains fewer '?' placeholders",
+			                  params.size());
+		}
+		result.replace(found, 1, ValueToSQLLiteral(param));
+		pos = found + 1;
+	}
+	return result;
+}
+
+unique_ptr<MySQLResult> MySQLConnection::QueryInternal(optional_ptr<ClientContext> context, const string &query,
+                                                       const vector<Value> &params, MySQLResultStreaming streaming) {
+	auto con = GetConn();
+	lock_guard<mutex> guard(query_lock);
+
+	string sql = query;
+	if (!params.empty()) {
+		sql = InlineParams(query, params);
+	}
+
+	if (MySQLConnection::DebugPrintQueries()) {
+		string msg = StringUtil::Format("%s /* streaming=%s */\n",
+		                                sql, streaming == MySQLResultStreaming::ALLOW_STREAMING ? "TRUE" : "FALSE");
+		Printer::Print(msg);
+	}
+
+	int res_query = mysql_real_query(con, sql.c_str(), sql.size());
+	if (res_query != 0) {
+		throw IOException("Failed to run query \"%s\": %s\n", sql.c_str(), mysql_error(con));
+	}
+
+	unsigned long long affected_rows = mysql_affected_rows(con);
+	if (affected_rows == (unsigned long long)-1) {
+		// the query produced a result set, read it with the unbuffered interface
+		MYSQL_RES *res = mysql_use_result(con);
+		if (!res) {
+			throw IOException("Failed to get result for MySQL query \"%s\": %s\n", sql.c_str(), mysql_error(con));
+		}
+		return make_uniq<MySQLResult>(context, query, MySQLResultPtr(res, MySQLResultDelete), type_config,
+		                              connection_string, connection->GetID(), streaming, static_cast<idx_t>(-1), con);
+	}
+	// DML query without a result set
+	return make_uniq<MySQLResult>(context, query, MySQLResultPtr(nullptr, MySQLResultDelete), type_config, connection_string, connection->GetID(),
+	                              streaming, static_cast<idx_t>(affected_rows), con);
+}
+
+unique_ptr<MySQLResult> MySQLConnection::Query(ClientContext &context, const string &query,
+                                               MySQLResultStreaming streaming) {
+	return QueryInternal(context, query, vector<Value>(), streaming);
+}
+
+unique_ptr<MySQLResult> MySQLConnection::Query(ClientContext &context, const string &query, const vector<Value> &params,
+                                               MySQLResultStreaming streaming) {
+	return QueryInternal(context, query, params, streaming);
+}
+
+void MySQLConnection::Initialize(ClientContext &context, const MySQLConnectionInitOptions &options) {
+	SetTypeConfig(options.type_config);
+
+	if (!options.time_zone.empty()) {
+		Execute(context, "SET TIME_ZONE = " + MySQLUtils::WriteLiteral(options.time_zone));
+	}
+}
+
+void MySQLConnection::Execute(ClientContext &context, const string &query) {
+	Execute(context, query, vector<Value>());
+}
+
+void MySQLConnection::Execute(ClientContext &context, const string &query, const vector<Value> &params) {
+	// the result is fetched unbuffered and drained immediately
+	auto result = QueryInternal(context, query, params, MySQLResultStreaming::ALLOW_STREAMING);
+	DrainResult(*result);
+}
+
+bool MySQLConnection::IsConnectionHealthy(const string &health_check_query) {
+	if (!IsOpen()) {
+		return false;
+	}
+
+	if (!health_check_query.empty()) {
+		try {
+			// called by the connection pool, no context is available, the result is fetched unbuffered and
+			// drained immediately, so the connection can be used for other queries
+			auto result =
+			    QueryInternal(nullptr, health_check_query, vector<Value>(), MySQLResultStreaming::ALLOW_STREAMING);
+			DrainResult(*result);
+			return true;
+		} catch (...) {
+			return false;
+		}
+	}
+
+	lock_guard<mutex> guard(query_lock);
+
+	MYSQL *mysql_conn = GetConn();
+	if (mysql_ping(mysql_conn) != 0) {
+		unsigned int err = mysql_errno(mysql_conn);
+		(void)err;
+		return false;
+	}
+	return true;
+}
 } // namespace duckdb

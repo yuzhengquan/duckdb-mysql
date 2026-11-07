@@ -12,7 +12,6 @@
 #include "duckdb/common/mutex.hpp"
 
 #include "mysql_result.hpp"
-#include "mysql_statement.hpp"
 #include "mysql_types.hpp"
 #include "mysql_utils.hpp"
 
@@ -22,7 +21,6 @@ class MySQLTextWriter;
 struct MySQLBinaryReader;
 class MySQLSchemaEntry;
 class MySQLTableEntry;
-struct MySQLStatement;
 class MySQLResult;
 struct IndexInfo;
 
@@ -77,9 +75,6 @@ public:
 	                              MySQLResultStreaming streaming = MySQLResultStreaming::FORCE_MATERIALIZATION);
 	unique_ptr<MySQLResult> Query(ClientContext &context, const string &query, const vector<Value> &params,
 	                              MySQLResultStreaming streaming);
-	unique_ptr<MySQLResult> QueryStmt(ClientContext &context, MySQLStatement &stmt, const vector<Value> &params,
-	                                  MySQLResultStreaming streaming);
-	unique_ptr<MySQLStatement> Prepare(const string &query);
 
 	vector<IndexInfo> GetIndexInfo(const string &table_name);
 
@@ -102,11 +97,7 @@ public:
 
 private:
 	unique_ptr<MySQLResult> QueryInternal(optional_ptr<ClientContext> context, const string &query,
-	                                      const vector<Value> &params, MySQLResultStreaming streaming,
-	                                      MySQLConnectorInterface con_interface);
-	idx_t MySQLExecute(optional_ptr<ClientContext> context, MYSQL_STMT *stmt, const string &query,
-	                   const vector<Value> &params, bool streaming, bool prepared = false);
-	void DrainBasicResult(optional_ptr<ClientContext> context, const string &query);
+	                                      const vector<Value> &params, MySQLResultStreaming streaming);
 
 	MYSQL *GetConn() {
 		if (!connection || !connection->connection) {

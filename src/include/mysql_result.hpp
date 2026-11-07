@@ -11,7 +11,6 @@
 #include "duckdb/common/types/column/column_data_collection.hpp"
 
 #include "mysql_field.hpp"
-#include "mysql_statement.hpp"
 #include "mysql_types.hpp"
 #include "mysql_utils.hpp"
 
@@ -25,15 +24,14 @@ inline void MySQLResultDelete(MYSQL_RES *res) {
 	mysql_free_result(res);
 }
 
-enum struct MySQLResultStatementLifetime { OWNED, BORROWED };
 
 class MySQLResult {
 public:
-	MySQLResult(optional_ptr<ClientContext> context_p, const std::string &query_p, MySQLStatementPtr stmt_p,
+	MySQLResult(optional_ptr<ClientContext> context_p, const std::string &query_p, MySQLResultPtr result_p,
 	            MySQLTypeConfig type_config_p, const string &connection_string_p, unsigned long connection_id_p,
-	            MySQLResultStreaming streaming_p, idx_t affected_rows_p,
-	            vector<MySQLField> fields_p = vector<MySQLField>(),
-	            MySQLResultStatementLifetime stmt_lifetime_p = MySQLResultStatementLifetime::OWNED);
+	            MySQLResultStreaming streaming_p, idx_t affected_rows_p, MYSQL *mysql_handle_p = nullptr);
+//
+//
 
 	~MySQLResult();
 
@@ -56,7 +54,8 @@ public:
 private:
 	optional_ptr<ClientContext> context;
 	string query;
-	MySQLStatementPtr stmt;
+	MySQLResultPtr result;
+	MYSQL *mysql_handle = nullptr;
 	MySQLTypeConfig type_config;
 	string connection_string;
 	unsigned long connection_id;
@@ -65,11 +64,13 @@ private:
 
 	vector<MySQLField> fields;
 
-	MySQLResultStatementLifetime stmt_lifetime = MySQLResultStatementLifetime::OWNED;
+//
 
 	DataChunk data_chunk;
 	idx_t row_idx = static_cast<idx_t>(-1);
 	bool exhausted = false;
+	MYSQL_ROW current_row = nullptr;
+	unsigned long *current_lengths = nullptr;
 
 	unique_ptr<ColumnDataCollection> materialized;
 	ColumnDataScanState materialized_scan_state;
@@ -77,7 +78,7 @@ private:
 
 	void FetchChunk();
 	bool FetchNext();
-	void HandleTruncatedData();
+//
 	void WriteToChunk(idx_t row);
 	void CheckColumnIdx(idx_t col);
 	void CheckNotNull(idx_t col);

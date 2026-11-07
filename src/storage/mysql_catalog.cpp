@@ -498,9 +498,6 @@ void MySQLCatalog::MaterializeMySQLScans(PhysicalOperator &op) {
 		if (MySQLCatalog::IsMySQLScan(function_name)) {
 			auto &bind_data = table_scan.bind_data->Cast<MySQLBindData>();
 			bind_data.optimizer_streaming = MySQLResultStreaming::FORCE_MATERIALIZATION;
-		} else if (MySQLCatalog::IsMySQLQuery(function_name)) {
-			auto &bind_data = table_scan.bind_data->Cast<MySQLQueryBindData>();
-			bind_data.optimizer_streaming = MySQLResultStreaming::FORCE_MATERIALIZATION;
 		}
 	}
 	for (auto &child : op.children) {

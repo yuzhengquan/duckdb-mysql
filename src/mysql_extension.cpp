@@ -118,11 +118,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	MySQLClearCacheFunction clear_cache_func;
 	loader.RegisterFunction(clear_cache_func);
 
-	MySQLExecuteFunction execute_function;
-	loader.RegisterFunction(execute_function);
 
-	MySQLQueryFunction query_function;
-	loader.RegisterFunction(query_function);
 
 	MySQLPinConnectionFunction pin_connection_function;
 	loader.RegisterFunction(pin_connection_function);
@@ -130,11 +126,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	MySQLClosePinnedConnectionFunction close_pinned_connection_function;
 	loader.RegisterFunction(close_pinned_connection_function);
 
-	MySQLCreateParamsFunction create_params_function;
-	loader.RegisterFunction(create_params_function);
 
-	MySQLBindParamsFunction bind_params_function;
-	loader.RegisterFunction(bind_params_function);
 
 	MySQLConfigurePoolFunction configure_pool_function;
 	loader.RegisterFunction(configure_pool_function);

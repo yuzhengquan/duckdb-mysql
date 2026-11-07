@@ -23,10 +23,6 @@ void GatherMySQLScans(ClientContext &ctx, LogicalOperator &op, MySQLOperators &r
 			auto &bdata = get.bind_data->Cast<MySQLBindData>();
 			result.scans[bdata.table_name.Catalog().GetIdentifierName()].push_back(get);
 		}
-		if (MySQLCatalog::IsMySQLQuery(table_scan.GetName().GetIdentifierName())) {
-			auto &bdata = get.bind_data->Cast<MySQLQueryBindData>();
-			result.scans[bdata.catalog_name.GetIdentifierName()].push_back(get);
-		}
 	}
 	for (auto &child : op.children) {
 		GatherMySQLScans(ctx, *child, result);
@@ -46,12 +42,6 @@ void MySQLOptimizer::Optimize(OptimizerExtensionInput &input, unique_ptr<Logical
 			auto &function_name = get.function.GetName().GetIdentifierName();
 			if (MySQLCatalog::IsMySQLScan(function_name)) {
 				auto &bind_data = get.bind_data->Cast<MySQLBindData>();
-				if (bind_data.optimizer_streaming == MySQLResultStreaming::UNINITIALIZED ||
-				    result_streaming == MySQLResultStreaming::FORCE_MATERIALIZATION) {
-					bind_data.optimizer_streaming = result_streaming;
-				}
-			} else if (MySQLCatalog::IsMySQLQuery(function_name)) {
-				auto &bind_data = get.bind_data->Cast<MySQLQueryBindData>();
 				if (bind_data.optimizer_streaming == MySQLResultStreaming::UNINITIALIZED ||
 				    result_streaming == MySQLResultStreaming::FORCE_MATERIALIZATION) {
 					bind_data.optimizer_streaming = result_streaming;
